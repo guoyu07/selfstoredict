@@ -93,7 +93,7 @@ class ChildDict(dict):
 
     def setdefault(self, k, v=None):
         v = adapt(self.parent, v)
-        super(ChildDict, self).setdefault(k, v)
+        v = super(ChildDict, self).setdefault(k, v)
         self.parent.save()
         return v
 
