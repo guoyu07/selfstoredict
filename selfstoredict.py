@@ -91,6 +91,12 @@ class ChildDict(dict):
         super(ChildDict, self).__delitem__(k)
         self.parent.save()
 
+    def get(self, k, v=None):
+        v = adapt(self.parent, v)
+        v = super(ChildDict, self).get(k, v)
+        self.parent.save()
+        return v
+
     def setdefault(self, k, v=None):
         v = adapt(self.parent, v)
         v = super(ChildDict, self).setdefault(k, v)
