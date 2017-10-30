@@ -1,14 +1,20 @@
 """SelfStoreDict for Python.
 Author: markus schulte <ms@dom.de>
-The module provides a subclassed dictionary that saves itself to a JSON file whenever changed or when used within a context
+The module provides a subclassed dictionary that saves itself to a JSON file or redis-key whenever changed or when used
+within a context.
 """
 import json
+from os.path import getmtime
+from datetime import datetime, timedelta
+from pathlib import Path
 
 
 def adapt(parent, elem=None):
     """
-    called whenever a dict or list is added. needed in order to  let SelfStoreDict know about changes happening to its childs.
-    :param parent: the parent object of the to be constructed one. parent should always be off type SelfStorageDict and should always be the root object.
+    called whenever a dict or list is added. needed in order to let SelfStoreDict know about changes happening to its
+    childs.
+    :param parent: the parent object of the to be constructed one. parent should always be off type SelfStorageDict and
+    should always be the root object.
     :param elem: the element added to SelfStoreDict or it's childs
     :return: the elem, converted to a subclass of dict or list that notifies it's parent
     """
@@ -23,14 +29,15 @@ class ChildList(list):
     """
     a subclass of list that notifies self.parent about any change to its members
     """
-    def __init__(self, parent, l=None):
+
+    def __init__(self, parent, li=None):
         super(ChildList, self).__init__()
-        if l is None:
-            l = list()
+        if li is None:
+            li = list()
         self.parent = parent
-        for v in l:
+        for v in li:
             self.append(v)
-        if l != []:
+        if not li:
             self.parent.save()
 
     def append(self, v):
@@ -72,6 +79,7 @@ class ChildDict(dict):
     """
     a subclass of dict that notifies self.parent about any change to its members
     """
+
     def __init__(self, parent, d=None):
         super(ChildDict, self).__init__()
         if d is None:
@@ -102,21 +110,90 @@ class ChildDict(dict):
         self.parent.save()
 
 
+class FileContainer(object):
+    def __init__(self, path):
+        self.path = path
+
+    def save(self, data):
+        with open(self.path, "w") as fp:
+            json.dump(data.copy(), fp)
+
+    def load(self):
+        try:
+            with open(self.path) as fp:
+                for k, v in json.load(fp).items():
+                    yield [k, v]
+        except FileNotFoundError:
+            raise FileNotFoundError
+
+    def touch(self):
+        Path(self.path).touch()
+
+    @property
+    def modified(self):
+        return int(getmtime(self.path))
+
+
+class RedisContainer(object):
+    def __init__(self, key, redis):
+        self.key = key
+        self.redis = redis
+        self.f = 9223370527000000
+
+    def save(self, data):
+        self.redis.set(self.key, json.dumps(data.copy()))
+        self.redis.expire(self.key, self.f)
+
+    def load(self):
+        data = self.redis.get(self.key)
+        try:
+            jdata = json.loads(data)
+        except TypeError:
+            return
+        try:
+            for k, v in jdata.items():
+                yield [k, v]
+        except FileNotFoundError:
+            raise FileNotFoundError
+
+    def touch(self):
+        self.redis.expire(self.key, self.f)
+
+    @property
+    def modified(self):
+        ttl = self.redis.ttl(self.key)
+        if ttl is None:
+            return
+        delta = timedelta(seconds=self.f - ttl)
+        return int((datetime.now() - delta).timestamp())
+
+
 class SelfStoreDict(ChildDict):
     """
-    This class acts like a dict but constructs all attributes from JSON. please note: it is a subclass of 'ChildDict' but always the parent.
-    call the constructor with a path.
+    This class acts like a dict but constructs all attributes from JSON. please note: it is a subclass of 'ChildDict'
+    but always the parent.
+    call the constructor with a path or a redis connection
     you may add an optional initial value as a dict
     """
-    def __init__(self, path, d=None):
+
+    def __init__(self, path, data=None, redis=None):
         self._saves_ = 0
-        self._dirty_ = False
         self._context_ = False
-        self._inactive_ = False
+        self._inactive_ = True
         self.parent = self
-        self._truepath_ = ""
+        # check if there is a redis object
+        if redis is not None:
+            self.sc = RedisContainer(path, redis=redis)
+        else:
+            self.sc = FileContainer(path)
         self._path_ = path
-        super(SelfStoreDict, self).__init__(self, d)
+        super(SelfStoreDict, self).__init__(self, data)
+        if data is not None:
+            self._inactive_ = False
+            self.save()
+        else:
+            self._load()
+        self._inactive_ = False
 
     def _inc_saves(self):
         self._saves_ += 1
@@ -126,29 +203,24 @@ class SelfStoreDict(ChildDict):
             return False
         if self._context_:
             return False
-        return self._dirty_
+        return True
 
     def save(self):
         if self._savenow():
-            with open(self._path_, "w") as fp:
-                json.dump(self.copy(), fp)
+            self.sc.save(self.copy())
             self._inc_saves()
             return
-        if not self._inactive_:
-            self._dirty_ = True
 
     @property
     def saves(self):
         return self._saves_
 
     @property
-    def _path_(self):
-        return self._truepath_
+    def modified(self):
+        return self.sc.modified
 
-    @_path_.setter
-    def _path_(self, path):
-        self._truepath_ = path
-        self._load()
+    def touch(self):
+        self.sc.touch()
 
     def __enter__(self):
         self._context_ = True
@@ -161,29 +233,11 @@ class SelfStoreDict(ChildDict):
 
     def _load(self):
         """
-        called by '@path.setter' to load dict. uses '_inactive_' to prevent dict from beeing
-        written on any changes caused by loading.
+        called by '@path.setter' to load dict.
         :return: None
         """
-        self._inactive_ = True
         try:
-            with open(self._truepath_) as fp:
-                for k, v in json.load(fp).items():
-                    self[k] = v
+            for k, v in self.sc.load():
+                self[k] = v
         except FileNotFoundError:
             pass
-        finally:
-            self._inactive_ = False
-            if self._context_ == False:
-                self._dirty_ = True
-
-    def reload(self):
-        """
-        call if another instance may have changed the json file on disk.
-        :return: None
-        """
-        inactive = self._inactive_
-        dirty = self._dirty_
-        self._load()
-        self._inactive_ = inactive
-        self._dirty_ = dirty
