@@ -1,9 +1,10 @@
 from distutils.core import setup
+#from setuptools import setup
 
 setup(
     name='selfstoredict',
     version='0.5',
-    packages=[''],
+    packages=['selfstoredict'],
     url='https://github.com/markus61/selfstoredict',
     license='MIT',
     author='markus',
